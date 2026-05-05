@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+python-multipart
+google-genai
+requests
+Pillow
+boto3
+pypdf
+mangum

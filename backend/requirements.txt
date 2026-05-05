@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+openai
+pydantic
+pydantic-settings
+google-genai
+google-cloud-aiplatform
+requests
+python-dotenv
+Pillow
+pypdf
+python-multipart
