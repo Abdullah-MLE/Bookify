@@ -44,3 +44,5 @@ desktop.ini
 # Deployments
 lambda-deployment.zip
 lambda-package/
+
+docs/

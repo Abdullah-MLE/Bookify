@@ -52,9 +52,14 @@ if os.getenv("GOOGLE_APPLICATION_CREDENTIALS") and os.path.exists(
         "GCP_PROJECT_ID", "project-d3cc105c-93d6-42fa-abc"
     )
 
-# ── GeminiWrapper ────────────────────────────────────────────────────────────
-from libs.GeminiWrapper.GeminiWrapper import GeminiWrapper
-from libs.GeminiWrapper.models import InputParams, TextParams
+# ── AWS Bedrock Client ───────────────────────────────────────────────────────
+DEFAULT_AWS_REGION = os.getenv("DEFAULT_AWS_REGION", "us-east-1")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.amazon.nova-2-lite-v1:0")
+
+bedrock_client = boto3.client(
+    service_name="bedrock-runtime",
+    region_name=DEFAULT_AWS_REGION,
+)
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
 app = FastAPI(title="AI Digital Twin API")
@@ -120,18 +125,68 @@ class ChatResponse(BaseModel):
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+
+def call_bedrock(conversation: list, user_message: str) -> str:
+    """Call AWS Bedrock with conversation history - optimized for quota limits"""
+    messages = []
+
+    # Summarize: only use the most recent 3 messages
+    recent_msgs = conversation[-3:] if len(conversation) > 0 else []
+    
+    for msg in recent_msgs:
+        messages.append({
+            "role": msg["role"],
+            "content": [{"text": msg["content"]}],
+        })
+
+    messages.append({
+        "role": "user",
+        "content": [{"text": user_message}],
+    })
+
+    try:
+        response = bedrock_client.converse(
+            modelId=BEDROCK_MODEL_ID,
+            messages=messages,
+            inferenceConfig={
+                "maxTokens": 500,  # Reduced from 1000
+                "temperature": 0.5,  # Reduced from 0.7
+            },
+        )
+    except ClientError as e:
+        error_msg = str(e)
+        # Return a friendly error message instead of crashing
+        if "ThrottlingException" in error_msg or "Too many tokens" in error_msg:
+            return "أعتذر، الخدمة مشغولة جداً الآن. يرجى المحاولة لاحقاً."
+        raise HTTPException(status_code=500, detail=f"Bedrock error: {error_msg}")
+
+    output = response.get("output", {}).get("message", {}).get("content")
+    if not output or not isinstance(output, list):
+        raise HTTPException(status_code=500, detail="Invalid Bedrock response format")
+
+    return output[0].get("text", "").strip()
+
+
 @app.get("/")
 async def root():
     return {
-        "message": "AI Digital Twin API (powered by Gemini)",
+        "message": "AI Digital Twin API (powered by AWS Bedrock)",
         "memory_enabled": True,
-        "storage": "S3" if USE_S3 else "local"
+        "storage": "S3" if USE_S3 else "local",
+        "bedrock_model": BEDROCK_MODEL_ID,
+        "region": DEFAULT_AWS_REGION,
     }
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "use_s3": USE_S3}
+    return {
+        "status": "healthy",
+        "use_s3": USE_S3,
+        "bedrock_model": BEDROCK_MODEL_ID,
+        "region": DEFAULT_AWS_REGION,
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -140,32 +195,7 @@ async def chat(request: ChatRequest):
         session_id = request.session_id or str(uuid.uuid4())
         conversation = load_conversation(session_id)
 
-        # Build full conversation as a single prompt string so Gemini understands context
-        history_text = ""
-        # Only take the last 10 messages for context window efficiency
-        for msg in conversation[-10:]:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            history_text += f"{role}: {msg['content']}\n"
-
-        dynamic_prompt = prompt()
-
-        full_prompt = (
-            f"{dynamic_prompt}\n\n"
-            f"{history_text}"
-            f"User: {request.message}\n"
-            "Assistant:"
-        )
-
-        wrapper = GeminiWrapper()
-        result = wrapper.generate_text(
-            input_params=InputParams(prompt=full_prompt),
-            text_params=TextParams(response_mime_type="text/plain"),
-        )
-
-        if not result["success"]:
-            raise HTTPException(status_code=500, detail=result.get("error", "Gemini error"))
-
-        assistant_response = result["content"].strip()
+        assistant_response = call_bedrock(conversation, request.message)
 
         # Save to memory
         conversation.append(
